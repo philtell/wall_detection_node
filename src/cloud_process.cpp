@@ -113,29 +113,28 @@ float GroundSegmetation::calculateSlopeAngle(
     return 0;
 }
 
-void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input)
+void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input,pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_non_ground,std::vector<WallSlice>& height_slice,double& slope_angle)
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ground(new pcl::PointCloud<pcl::PointXYZI>);
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_non_ground(new pcl::PointCloud<pcl::PointXYZI>);
     // 转换 PointCloud2 数据为 PCL 点云
     pcl::fromROSMsg(*input, *cloud);
-    cloud_filtered->reserve(cloud->points.size());
-    for(auto point : cloud->points)
-    {
-        if(point.x > 15 && point.x <-15 && point.z <5 && point.z  >-5 && point.y > 7 && point.y < 40)
-        {
-            cloud_filtered->points.push_back(point);
-        }
-    }
+    // cloud_filtered->reserve(cloud->points.size());
+    // for(auto point : cloud->points)
+    // {
+    //     if(point.x > 15 && point.x <-15 && point.z <5 && point.z  >-5 && point.y > 7 && point.y < 40)
+    //     {
+    //         cloud_filtered->points.push_back(point);
+    //     }
+    // }
 
     // 过滤掉过远和过近的点（假设地面在一定的Z范围内）
-    // pcl::PassThrough<pcl::PointXYZI> pass;
-    // pass.setInputCloud(cloud);
-    // pass.setFilterFieldName("z");
-    // pass.setFilterLimits(-5.0, 5.0); // 设置Z轴过滤范围
-    // pass.filter(*cloud_filtered);
+    pcl::PassThrough<pcl::PointXYZI> pass;
+    pass.setInputCloud(cloud);
+    pass.setFilterFieldName("z");
+    pass.setFilterLimits(-5.0, 5.0); // 设置Z轴过滤范围
+    pass.filter(*cloud_filtered);
 
     // 创建一个 RANSAC 分割对象
     pcl::SACSegmentation<pcl::PointXYZI> seg;
@@ -160,26 +159,27 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
         return;
     }
 
-    // 提取出地面点
-    pcl::ExtractIndices<pcl::PointXYZI> extract;
-    extract.setInputCloud(cloud_filtered);
-    extract.setIndices(inlier_indices);
-    extract.setNegative(false);  // 提取平面内的点
-    extract.filter(*cloud_ground);
+    // // 提取出地面点
+    // pcl::ExtractIndices<pcl::PointXYZI> extract;
+    // extract.setInputCloud(cloud_filtered);
+    // extract.setIndices(inlier_indices);
+    // extract.setNegative(false);  // 提取平面内的点
+    // extract.filter(*cloud_ground);
 
-    // 提取非地面点
-    extract.setNegative(true);  // 提取平面外的点
-    extract.filter(*cloud_non_ground);
+    // // 提取非地面点
+    // extract.setNegative(true);  // 提取平面外的点
+    // extract.filter(*cloud_non_ground);
 
+    // height_slice = sliceWallByY(cloud_non_ground);
 
-    // 计算反坡角度
-    double slope_angle = calculateSlopeAngle(coefficients);
+    // // 计算反坡角度
+    // slope_angle = calculateSlopeAngle(coefficients);
     
-    // 调整反坡角度，考虑IMU的俯仰角度
-    double corrected_slope_angle = slope_angle - imu_pitch; // 校正反坡角度
+    // // 调整反坡角度，考虑IMU的俯仰角度
+    // double corrected_slope_angle = slope_angle - imu_pitch; // 校正反坡角度
 
-    ROS_INFO("Ground points: %zu", cloud_ground->points.size());
-    ROS_INFO("Non-ground points: %zu", cloud_non_ground->points.size());
-    ROS_INFO("Original slope angle: %.2f degrees", slope_angle);
-    ROS_INFO("Corrected slope angle (adjusted for pitch): %.2f degrees", corrected_slope_angle);
+    // ROS_INFO("Ground points: %zu", cloud_ground->points.size());
+    // ROS_INFO("Non-ground points: %zu", cloud_non_ground->points.size());
+    // ROS_INFO("Original slope angle: %.2f degrees", slope_angle);
+    // ROS_INFO("Corrected slope angle (adjusted for pitch): %.2f degrees", corrected_slope_angle);
 }

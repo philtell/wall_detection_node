@@ -11,6 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   pcl_conversions
   gps_common
+  visualization_msgs
 )
 
 # Find PCL
