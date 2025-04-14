@@ -1,32 +1,145 @@
 #include "cloud_process.h"
 
 // 输入：聚类点云
-std::vector<WallSlice> GroundSegmetation::sliceWallByY(pcl::PointCloud<pcl::PointXYZ>::Ptr wall_cluster, float slice_width = 1.0f)
+std::vector<WallSlice> GroundSegmetation::sliceWallByX(
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cluster,
+    float slice_width)
 {
-    std::map<int, std::vector<float>> slice_zs;
+    std::vector<WallSlice> slices;
 
-    // 将点按 y 分组（每 1m 为一个 slice）
-    for (const auto& pt : wall_cluster->points) {
-        int y_index = static_cast<int>(pt.y / slice_width);
-        slice_zs[y_index].push_back(pt.z);
+    if (cluster->empty()) return slices;
+
+    float x_min = std::numeric_limits<float>::max();
+    float x_max = std::numeric_limits<float>::lowest();
+
+    for (const auto& pt : cluster->points)
+    {
+        if (pt.x < x_min) x_min = pt.x;
+        if (pt.x > x_max) x_max = pt.x;
     }
 
-    // 计算每个 slice 的高度信息
-    std::vector<WallSlice> slices;
-    for (const auto& [index, zs] : slice_zs) {
-        if (zs.size() < 3) continue;  // 过滤掉太小的片段
-        float min_z = *std::min_element(zs.begin(), zs.end());
-        float max_z = *std::max_element(zs.begin(), zs.end());
+    int num_slices = static_cast<int>((x_max - x_min) / slice_width) + 1;
+    std::vector<std::vector<pcl::PointXYZI>> bins(num_slices);
+
+    for (const auto& pt : cluster->points)
+    {
+        int idx = static_cast<int>((pt.x - x_min) / slice_width);
+        if (idx >= 0 && idx < num_slices)
+            bins[idx].push_back(pt);
+    }
+
+    for (int i = 0; i < num_slices; ++i)
+    {
+        if (bins[i].empty()) continue;
+
+        float z_min = std::numeric_limits<float>::max();
+        float z_max = std::numeric_limits<float>::lowest();
+        float y_sum = 0.0f;
+        float x_sum = 0.0f;
+
+        for (const auto& pt : bins[i])
+        {
+            if (pt.z < z_min) z_min = pt.z;
+            if (pt.z > z_max) z_max = pt.z;
+            y_sum += pt.y;
+            x_sum += pt.x;
+        }
 
         WallSlice slice;
-        slice.y_center = (index + 0.5f) * slice_width;
-        slice.z_min = min_z;
-        slice.z_max = max_z;
+        slice.x_center = x_sum / bins[i].size();
+        slice.y_center = y_sum / bins[i].size();
+        slice.z_min = z_min;
+        slice.z_max = z_max;
+
         slices.push_back(slice);
     }
 
     return slices;
 }
+
+std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmetation::clusterByGridBFS(const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud)
+{
+    const float grid_size = 1.0;
+    const float x_min = -20.0f, x_max = 20.0f;
+    const float y_min = -60.0f, y_max = -4.0f;
+
+    const int grid_cols = static_cast<int>((x_max - x_min) / grid_size);  // X方向
+    const int grid_rows = static_cast<int>((y_max - y_min) / grid_size);  // Y方向
+
+    // 建立格子索引：每个格子里存放的是点的索引
+    std::vector<std::vector<std::vector<int>>> grid(grid_rows, std::vector<std::vector<int>>(grid_cols));
+
+    int valid_points = 0;
+    int no_valid_points = 0;
+    // 映射点到栅格
+    for (size_t i = 0; i < input_cloud->points.size(); ++i) {
+        const auto& pt = input_cloud->points[i];
+        if (pt.x < x_min || pt.x >= x_max || pt.y < y_min || pt.y >= y_max) 
+        {
+            // ROS_INFO("Point %zu: x = %.2f, y = %.2f", i, pt.x, pt.y);
+            ++no_valid_points;
+            continue;
+        }
+
+        ++valid_points;
+        int col = static_cast<int>((pt.x - x_min) / grid_size);
+        int row = static_cast<int>((pt.y - y_min) / grid_size);
+        grid[row][col].push_back(i);
+    }
+    ROS_INFO("valid points: %d no valid points: %d", valid_points,no_valid_points);
+
+    int non_empty_cells = 0;
+    for (int r = 0; r < grid_rows; ++r) {
+        for (int c = 0; c < grid_cols; ++c) {
+            if (!grid[r][c].empty()) ++non_empty_cells;
+        }
+    }
+    ROS_INFO("no empty grid size: %d", non_empty_cells);
+    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clusters;
+    std::vector<std::vector<bool>> visited(grid_rows, std::vector<bool>(grid_cols, false));
+
+    const int dx[4] = {-1, 0, 1, 0};
+    const int dy[4] = {0, 1, 0, -1};
+
+    // BFS 遍历每个格子
+    for (int r = 0; r < grid_rows; ++r) {
+        for (int c = 0; c < grid_cols; ++c) {
+            if (visited[r][c] || grid[r][c].empty()) continue;
+
+            pcl::PointCloud<pcl::PointXYZI>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZI>);
+            std::queue<std::pair<int, int>> q;
+            q.emplace(r, c);
+            visited[r][c] = true;
+
+            while (!q.empty()) {
+                auto [cr, cc] = q.front(); q.pop();
+
+                for (int idx : grid[cr][cc]) {
+                    cluster->points.push_back(input_cloud->points[idx]);
+                }
+
+                for (int i = 0; i < 4; ++i) {
+                    int nr = cr + dy[i];
+                    int nc = cc + dx[i];
+                    if (nr >= 0 && nr < grid_rows && nc >= 0 && nc < grid_cols &&
+                        !visited[nr][nc] && !grid[nr][nc].empty()) {
+                        q.emplace(nr, nc);
+                        visited[nr][nc] = true;
+                    }
+                }
+            }
+            ROS_INFO("inner Cluster size: %zu", cluster->points.size());
+            if (cluster->points.size() >= 100) {  // 设定最小聚类点数
+                cluster->width = cluster->points.size();
+                cluster->height = 1;
+                cluster->is_dense = true;
+                clusters.push_back(cluster);
+            }
+        }
+    }
+    return clusters;
+}
+
 
 float GroundSegmetation::calculateSlopeAngle(
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in,
@@ -132,8 +245,12 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
     // 过滤掉过远和过近的点（假设地面在一定的Z范围内）
     pcl::PassThrough<pcl::PointXYZI> pass;
     pass.setInputCloud(cloud);
-    pass.setFilterFieldName("z");
-    pass.setFilterLimits(-5.0, 5.0); // 设置Z轴过滤范围
+    // pass.setFilterFieldName("z");
+    // pass.setFilterLimits(-5.0, 5.0); // 设置Z轴过滤范围
+    pass.setFilterFieldName("x");
+    pass.setFilterLimits(-15.0, 15.0); // 设置X轴过滤范围
+    // pass.setFilterFieldName("y");
+    // pass.setFilterLimits(5.0, 40.0); // 设置Y轴过滤范围
     pass.filter(*cloud_filtered);
 
     // 创建一个 RANSAC 分割对象
@@ -141,7 +258,7 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
     seg.setOptimizeCoefficients(true);
     seg.setModelType(pcl::SACMODEL_PLANE);  // 设置模型为平面
     seg.setMethodType(pcl::SAC_RANSAC);     // 设置方法为RANSAC
-    seg.setDistanceThreshold(0.2);          // 设置阈值，控制点与平面的最大距离
+    seg.setDistanceThreshold(0.15);          // 设置阈值，控制点与平面的最大距离
 
     // 输入点云
     seg.setInputCloud(cloud_filtered);
@@ -159,27 +276,36 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
         return;
     }
 
-    // // 提取出地面点
-    // pcl::ExtractIndices<pcl::PointXYZI> extract;
-    // extract.setInputCloud(cloud_filtered);
-    // extract.setIndices(inlier_indices);
-    // extract.setNegative(false);  // 提取平面内的点
-    // extract.filter(*cloud_ground);
+    // 提取出地面点
+    pcl::ExtractIndices<pcl::PointXYZI> extract;
+    extract.setInputCloud(cloud_filtered);
+    extract.setIndices(inlier_indices);
+    extract.setNegative(false);  // 提取平面内的点
+    extract.filter(*cloud_ground);
 
-    // // 提取非地面点
-    // extract.setNegative(true);  // 提取平面外的点
-    // extract.filter(*cloud_non_ground);
-
-    // height_slice = sliceWallByY(cloud_non_ground);
-
-    // // 计算反坡角度
-    // slope_angle = calculateSlopeAngle(coefficients);
+    // 提取非地面点
+    extract.setNegative(true);  // 提取平面外的点
+    extract.filter(*cloud_non_ground);
+    height_slice.clear();
+    auto wall_clusters = clusterByGridBFS(cloud_non_ground);
+    ROS_INFO("Wall clusters: %zu", wall_clusters.size());
+    cloud_non_ground->clear();
+    // 计算每个聚类的高度
+    for(auto cluster : wall_clusters)
+    {
+        *cloud_non_ground += *cluster;
+        auto slices = sliceWallByX(cluster, 3.0f); // 每 1 米切片
+        // 收集 slices
+        height_slice.insert(height_slice.end(), slices.begin(), slices.end());
+    }
+    // 计算反坡角度
+    slope_angle = calculateSlopeAngle(coefficients);
     
-    // // 调整反坡角度，考虑IMU的俯仰角度
-    // double corrected_slope_angle = slope_angle - imu_pitch; // 校正反坡角度
+    // 调整反坡角度，考虑IMU的俯仰角度
+    double corrected_slope_angle = slope_angle - imu_pitch; // 校正反坡角度
 
-    // ROS_INFO("Ground points: %zu", cloud_ground->points.size());
-    // ROS_INFO("Non-ground points: %zu", cloud_non_ground->points.size());
-    // ROS_INFO("Original slope angle: %.2f degrees", slope_angle);
-    // ROS_INFO("Corrected slope angle (adjusted for pitch): %.2f degrees", corrected_slope_angle);
+    ROS_INFO("Ground points: %zu", cloud_ground->points.size());
+    ROS_INFO("Non-ground points: %zu", cloud_non_ground->points.size());
+    ROS_INFO("Original slope angle: %.2f degrees", slope_angle);
+    ROS_INFO("Corrected slope angle (adjusted for pitch): %.2f degrees", corrected_slope_angle);
 }
