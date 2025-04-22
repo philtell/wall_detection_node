@@ -12,7 +12,6 @@
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/common/common.h>
-#include <mqtt/async_client.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include "cloud_process.h"
@@ -22,8 +21,19 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <thread>
+#include <chrono>
+
+
+int sock_fd;
+struct sockaddr_in server_addr;
 
 using json = nlohmann::json;
+
 
 struct WallPoint {
   double x;
@@ -41,42 +51,125 @@ struct WallInfo {
 
 double current_lat = 0.0;
 double current_lon = 0.0;
-mqtt::async_client* mqtt_client;
 
 GroundSegmetation ground_seg;
 
 ros::Publisher non_ground_pub;
 ros::Publisher height_marker_pub;
+ros::Publisher marker_pub;
 
 Eigen::Quaternionf imu_orientation = Eigen::Quaternionf::Identity();
 std::mutex imu_mutex;
-void publishToMQTT(const WallInfo& info, const pcl::PointCloud<pcl::PointXYZI>::Ptr& wall_cloud) {
-  // 发布结构化信息
+
+
+
+// 替代 mqtt_client = new mqtt::async_client(...) 等初始化代码
+void initSocket(const std::string& ip, int port) {
+  sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+      perror("Socket creation failed");
+      exit(EXIT_FAILURE);
+  }
+
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(port);
+  inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr);
+
+  while (true) {
+      if (connect(sock_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {
+          ROS_INFO("Connected to socket server at %s:%d", ip.c_str(), port);
+          break;
+      } else {
+          perror("Socket connection failed, retrying in 1s...");
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+      }
+  }
+}
+
+
+void publishToSocket(const WallInfo& info, const pcl::PointCloud<pcl::PointXYZI>::Ptr& wall_cloud) {
   json j;
   j["wall_points"] = json::array();
-  for (const auto &pt : info.wall_points)
-  {
-    j["wall_points"].push_back({{"x", pt.x},
-                                {"y", pt.y},
-                                {"z", pt.z}});
-    ROS_INFO("x:%f Y:%f z:%f", pt.x, pt.y, pt.z);
+  for (const auto &pt : info.wall_points) {
+      j["wall_points"].push_back({{"x", pt.x}, {"y", pt.y}, {"z", pt.z}});
   }
   j["slope_angle"] = info.back_slope_angle;
   j["lat"] = info.latitude;
   j["lon"] = info.longitude;
-  mqtt::message_ptr pubmsg = mqtt::make_message("wall/info", j.dump());
-  pubmsg->set_qos(1);
-  mqtt_client->publish(pubmsg);
 
-  // 发布点云信息（简单序列化为JSON数组）
   json cloud_json = json::array();
   for (const auto& pt : wall_cloud->points) {
-    cloud_json.push_back({ pt.x, pt.y, pt.z });
-      // std::cout<<"x:"<< pt.x<<" Y:"<<pt.y<<" z:"<<pt.z<<std::endl;
+      cloud_json.push_back({ pt.x, pt.y, pt.z });
   }
-  mqtt::message_ptr cloud_msg = mqtt::make_message("wall/cloud", cloud_json.dump());
-  cloud_msg->set_qos(1);
-  mqtt_client->publish(cloud_msg);
+  j["cloud"] = cloud_json;
+
+  std::string payload = j.dump();
+  int ret = send(sock_fd, payload.c_str(), payload.size(), 0);
+  if (ret < 0) {
+      perror("Socket send failed");
+  } else {
+      ROS_INFO("Wall info sent to socket, size: %ld bytes", payload.size());
+  }
+}
+
+
+// 发布平面
+void publishGroundPlaneMarker(const pcl::ModelCoefficients::Ptr& coefficients,
+                              ros::Publisher& marker_pub,
+                              const std::string& frame_id = "map")
+{
+  // 提取平面参数 ax + by + cz + d = 0
+  float a = coefficients->values[0];
+  float b = coefficients->values[1];
+  float c = coefficients->values[2];
+  float d = coefficients->values[3];
+
+  // 创建平面 marker（以一个矩形表示）
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "perception";  // 或你的坐标系
+  marker.header.stamp = ros::Time::now();
+  marker.ns = "ground_plane";
+  marker.id = 0;
+  marker.type = visualization_msgs::Marker::TRIANGLE_LIST;
+  marker.action = visualization_msgs::Marker::ADD;
+  marker.pose.orientation.w = 1.0;
+
+  marker.scale.x = 1.0;
+  marker.scale.y = 1.0;
+  marker.scale.z = 1.0;
+
+  marker.color.a = 0.5;
+  marker.color.r = 0.2;
+  marker.color.g = 0.8;
+  marker.color.b = 0.2;
+
+  // 构建矩形平面顶点（大小为10m x 10m）
+  float size = 10.0;
+  std::vector<Eigen::Vector3f> corners;
+  corners.emplace_back(-size, 0, 0);
+  corners.emplace_back(size, 0, 0);
+  corners.emplace_back(size, size*2, 0);
+  corners.emplace_back(-size, size*2, 0);
+
+  // 将每个角点投影到平面上
+  for (auto& pt : corners)
+  {
+    float t = -(a * pt.x() + b * pt.y() + c * pt.z() + d) / (a * a + b * b + c * c);
+    pt = pt + t * Eigen::Vector3f(a, b, c);
+  }
+
+  // 构建两个三角形
+  std::vector<int> indices = {0, 1, 2, 0, 2, 3};
+  for (int idx : indices)
+  {
+    geometry_msgs::Point p;
+    p.x = corners[idx].x();
+    p.y = corners[idx].y();
+    p.z = corners[idx].z();
+    marker.points.push_back(p);
+  }
+
+  marker_pub.publish(marker);
 }
 
 void gpsCallback(const gps_common::GPSFixConstPtr& msg) {
@@ -133,14 +226,15 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
   corrected_msg.header = cloud_msg->header;
   std::vector<WallSlice> height_slice;
   double slope_angle;
-  ground_seg.ground_sgementation(cloud_msg,cloud_non_ground,height_slice,slope_angle);
+  pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
+  ground_seg.ground_sgementation(cloud_msg,cloud_non_ground,height_slice,slope_angle,coefficients);
   sensor_msgs::PointCloud2 cloud_msg2;
   pcl::toROSMsg(*cloud_non_ground, cloud_msg2);
   cloud_msg2.header.frame_id = "perception";  // 或你的坐标系
   cloud_msg2.header.stamp = ros::Time::now();
   non_ground_pub.publish(cloud_msg2);
   ROS_INFO("No Ground points: %zu", cloud_non_ground->points.size());
-
+  publishGroundPlaneMarker(coefficients, marker_pub);
   visualization_msgs::MarkerArray marker_array;
   int id = 0;
   WallInfo info;
@@ -183,7 +277,9 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
   info.latitude = current_lat;
   info.longitude = current_lon;
 
-  publishToMQTT(info, cloud_non_ground);
+  publishToSocket(info, cloud_non_ground);
+
+  // publishToMQTT(info, cloud_non_ground);
 
   // 程序退出前，记录结束时间
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -195,10 +291,9 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 int main(int argc, char** argv) {
   ros::init(argc, argv, "wall_detector_node");
   ros::NodeHandle nh;
-  // 初始化 MQTT 客户端
-  mqtt_client = new mqtt::async_client("tcp://localhost:1883", "ros_wall_detector");
-  mqtt::connect_options connOpts;
-  mqtt_client->connect(connOpts)->wait();
+
+  initSocket("127.0.0.1", 9000);  // 你可以替换为目标服务器的 IP 和端口
+
 
   // ROS 订阅
   ros::Subscriber cloud_sub = nh.subscribe("lidar_back/raw_cloud", 10, cloudCallback);
@@ -207,10 +302,11 @@ int main(int argc, char** argv) {
 
   non_ground_pub = nh.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
   height_marker_pub = nh.advertise<visualization_msgs::MarkerArray>("wall_height_markers", 1);
+  marker_pub = nh.advertise<visualization_msgs::Marker>("ground_plane_marker", 1);
 
   ros::spin();
 
-  mqtt_client->disconnect()->wait();
-  delete mqtt_client;
+  close(sock_fd);
+
   return 0;
 }

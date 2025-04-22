@@ -43,7 +43,7 @@ add_executable(wall_detector_node src/ros_mqtt_wall_detector.cpp src/cloud_proce
 target_link_libraries(wall_detector_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
-  paho-mqttpp3
-  paho-mqtt3as
+  # paho-mqttpp3
+  # paho-mqtt3as
   # PahoMqttCpp::PahoMqttCpp  # This is the Paho MQTT C++ library if you use `find_package`
 )

@@ -45,7 +45,7 @@ public:
     {
 
     }
-    void ground_sgementation(const sensor_msgs::PointCloud2ConstPtr &input, pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_non_ground, std::vector<WallSlice> &height_slice, double &slope_angle);
+    void ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input,pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_non_ground,std::vector<WallSlice>& height_slice,double& slope_angle,pcl::ModelCoefficients::Ptr &coefficients);
     std::vector<WallSlice> sliceWallByX(pcl::PointCloud<pcl::PointXYZI>::Ptr wall_cluster, float slice_width);
     float calculateSlopeAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in, float &wall_height_out, pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out);
     std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clusterByGridBFS(

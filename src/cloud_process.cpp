@@ -226,7 +226,7 @@ float GroundSegmetation::calculateSlopeAngle(
     return 0;
 }
 
-void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input,pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_non_ground,std::vector<WallSlice>& height_slice,double& slope_angle)
+void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input,pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_non_ground,std::vector<WallSlice>& height_slice,double& slope_angle,pcl::ModelCoefficients::Ptr &coefficients)
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZI>);
@@ -264,7 +264,7 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
     seg.setInputCloud(cloud_filtered);
 
     // 输出
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    // pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inlier_indices(new pcl::PointIndices);
 
     // 进行地面分割，返回平面内的点
