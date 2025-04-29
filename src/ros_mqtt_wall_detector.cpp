@@ -55,6 +55,7 @@ double current_lon = 0.0;
 GroundSegmetation ground_seg;
 
 ros::Publisher non_ground_pub;
+ros::Publisher ground_pub;
 ros::Publisher height_marker_pub;
 ros::Publisher marker_pub;
 
@@ -134,9 +135,9 @@ void publishGroundPlaneMarker(const pcl::ModelCoefficients::Ptr& coefficients,
   marker.action = visualization_msgs::Marker::ADD;
   marker.pose.orientation.w = 1.0;
 
-  marker.scale.x = 1.0;
-  marker.scale.y = 1.0;
-  marker.scale.z = 1.0;
+  marker.scale.x = 2.0;
+  marker.scale.y = 2.0;
+  marker.scale.z = 2.0;
 
   marker.color.a = 0.5;
   marker.color.r = 0.2;
@@ -144,7 +145,7 @@ void publishGroundPlaneMarker(const pcl::ModelCoefficients::Ptr& coefficients,
   marker.color.b = 0.2;
 
   // 构建矩形平面顶点（大小为10m x 10m）
-  float size = 10.0;
+  float size = 15.0;
   std::vector<Eigen::Vector3f> corners;
   corners.emplace_back(-size, 0, 0);
   corners.emplace_back(size, 0, 0);
@@ -191,6 +192,7 @@ void imuCallback(const sensor_msgs::Imu::ConstPtr& imu_msg)
 
 void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_non_ground(new pcl::PointCloud<pcl::PointXYZI>);
+  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ground(new pcl::PointCloud<pcl::PointXYZI>);
   // 记录程序开始时间
   auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -214,26 +216,35 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
             Eigen::AngleAxisf(-roll,  Eigen::Vector3f::UnitX());
 
   Eigen::Affine3f transform(inv_rot);
-  pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZI>());
+
+  float roll_deg = 2.0f;
+  float pitch_deg = 0.0f;
+
+  float roll_rad = roll_deg * M_PI / 180.0f;
+  float pitch_rad = pitch_deg * M_PI / 180.0f;
+  // 逆向旋转矫正
+  transform.rotate(Eigen::AngleAxisf(-roll_rad, Eigen::Vector3f::UnitX()));
+  transform.rotate(Eigen::AngleAxisf(-pitch_rad, Eigen::Vector3f::UnitY()));
+
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_out(new pcl::PointCloud<pcl::PointXYZI>());
-
-  pcl::fromROSMsg(*cloud_msg, *cloud_in);  
-  pcl::transformPointCloud(*cloud_in, *cloud_out, transform);
-
-  // 发布矫正后的点云（可选）
-  sensor_msgs::PointCloud2 corrected_msg;
-  pcl::toROSMsg(*cloud_out, corrected_msg);
-  corrected_msg.header = cloud_msg->header;
   std::vector<WallSlice> height_slice;
   double slope_angle;
   pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
-  ground_seg.ground_sgementation(cloud_msg,cloud_non_ground,height_slice,slope_angle,coefficients);
+  ground_seg.ground_sgementation(cloud_msg,cloud_non_ground,cloud_ground,height_slice,slope_angle,coefficients);
   sensor_msgs::PointCloud2 cloud_msg2;
   pcl::toROSMsg(*cloud_non_ground, cloud_msg2);
   cloud_msg2.header.frame_id = "perception";  // 或你的坐标系
   cloud_msg2.header.stamp = ros::Time::now();
   non_ground_pub.publish(cloud_msg2);
-  ROS_INFO("No Ground points: %zu", cloud_non_ground->points.size());
+  pcl::transformPointCloud(*cloud_ground, *cloud_out, transform);
+  // 发布矫正后的点云（可选）
+  sensor_msgs::PointCloud2 corrected_msg;
+  pcl::toROSMsg(*cloud_out, corrected_msg);
+  corrected_msg.header = cloud_msg->header;
+  ground_pub.publish(corrected_msg);
+  double transform_angle = slope_angle;
+  ground_seg.getSlopAngle(cloud_ground,transform_angle);
+  ROS_INFO("roll: %.3f pitch:%.3f,before angle:%.3f after transform angle:%.3f", roll,pitch,slope_angle,transform_angle);
   publishGroundPlaneMarker(coefficients, marker_pub);
   visualization_msgs::MarkerArray marker_array;
   int id = 0;
@@ -292,15 +303,16 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "wall_detector_node");
   ros::NodeHandle nh;
 
-  initSocket("127.0.0.1", 9000);  // 你可以替换为目标服务器的 IP 和端口
+  // initSocket("127.0.0.1", 9000);  // 你可以替换为目标服务器的 IP 和端口
 
 
   // ROS 订阅
-  ros::Subscriber cloud_sub = nh.subscribe("lidar_back/raw_cloud", 10, cloudCallback);
+  ros::Subscriber cloud_sub = nh.subscribe("lidar_front/raw_cloud", 10, cloudCallback);
   ros::Subscriber rtk_sub = nh.subscribe("rtk_test", 10, gpsCallback);
   ros::Subscriber imu_sub = nh.subscribe("imu_test", 10, imuCallback);
 
   non_ground_pub = nh.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
+  ground_pub = nh.advertise<sensor_msgs::PointCloud2>("transform_ground_cloud", 1);
   height_marker_pub = nh.advertise<visualization_msgs::MarkerArray>("wall_height_markers", 1);
   marker_pub = nh.advertise<visualization_msgs::Marker>("ground_plane_marker", 1);
 
