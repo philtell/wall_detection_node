@@ -1,7 +1,7 @@
 #include "cloud_process.h"
 
 // 输入：聚类点云
-std::vector<WallSlice> GroundSegmetation::sliceWallByY(
+std::vector<WallSlice> GroundSegmentation::sliceWallByY(
     pcl::PointCloud<pcl::PointXYZI>::Ptr cluster,
     float slice_width)
 {
@@ -64,7 +64,7 @@ std::vector<WallSlice> GroundSegmetation::sliceWallByY(
 }
 
 // 输入：聚类点云
-std::vector<WallSlice> GroundSegmetation::sliceWallByX(
+std::vector<WallSlice> GroundSegmentation::sliceWallByX(
     pcl::PointCloud<pcl::PointXYZI>::Ptr cluster,
     float slice_width)
 {
@@ -126,11 +126,279 @@ std::vector<WallSlice> GroundSegmetation::sliceWallByX(
     return slices;
 }
 
-std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmetation::clusterByGridBFS(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud)
+// 替代 mqtt_client = new mqtt::async_client(...) 等初始化代码
+void GroundSegmentation::initSocket(const std::string &ip, int port)
+{
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0)
+    {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr);
+
+    while (true)
+    {
+        if (connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == 0)
+        {
+            ROS_INFO("Connected to socket server at %s:%d", ip.c_str(), port);
+            break;
+        }
+        else
+        {
+            perror("Socket connection failed, retrying in 1s...");
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+}
+
+GroundSegmentation::~GroundSegmentation()
+{
+
+}
+
+// 发布平面
+void GroundSegmentation::publishGroundPlaneMarker(const pcl::ModelCoefficients::Ptr &coefficients,
+                                                 ros::Publisher &marker_pub,
+                                                 const std::string &frame_id)
+{
+    // 提取平面参数 ax + by + cz + d = 0
+    float a = coefficients->values[0];
+    float b = coefficients->values[1];
+    float c = coefficients->values[2];
+    float d = coefficients->values[3];
+
+    // 创建平面 marker（以一个矩形表示）
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = "perception"; // 或你的坐标系
+    marker.header.stamp = ros::Time::now();
+    marker.ns = "ground_plane";
+    marker.id = 0;
+    marker.type = visualization_msgs::Marker::TRIANGLE_LIST;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+
+    marker.scale.x = 2.0;
+    marker.scale.y = 2.0;
+    marker.scale.z = 2.0;
+
+    marker.color.a = 0.5;
+    marker.color.r = 0.2;
+    marker.color.g = 0.8;
+    marker.color.b = 0.2;
+
+    // 构建矩形平面顶点（大小为10m x 10m）
+    float size = 15.0;
+    std::vector<Eigen::Vector3f> corners;
+    corners.emplace_back(-size, 0, 0);
+    corners.emplace_back(size, 0, 0);
+    corners.emplace_back(size, size * 2, 0);
+    corners.emplace_back(-size, size * 2, 0);
+
+    // 将每个角点投影到平面上
+    for (auto &pt : corners)
+    {
+        float t = -(a * pt.x() + b * pt.y() + c * pt.z() + d) / (a * a + b * b + c * c);
+        pt = pt + t * Eigen::Vector3f(a, b, c);
+    }
+
+    // 构建两个三角形
+    std::vector<int> indices = {0, 1, 2, 0, 2, 3};
+    for (int idx : indices)
+    {
+        geometry_msgs::Point p;
+        p.x = corners[idx].x();
+        p.y = corners[idx].y();
+        p.z = corners[idx].z();
+        marker.points.push_back(p);
+    }
+
+    marker_pub.publish(marker);
+}
+
+GroundSegmentation::GroundSegmentation(ros::NodeHandle &nh) : nh_(nh)
+{
+    // initSocket("127.0.0.1", 9000); // 你可以替换为目标服务器的 IP 和端口
+    loadParams();
+    service_ = nh_.advertiseService("reload_params", &GroundSegmentation::reloadCallback, this);
+    // ROS 订阅
+    cloud_sub = nh_.subscribe("lidar_front/raw_cloud", 10, &GroundSegmentation::cloudCallback,this);
+    rtk_sub = nh_.subscribe("rtk_test", 10, &GroundSegmentation::gpsCallback,this);
+    imu_sub = nh_.subscribe("imu_test", 10, &GroundSegmentation::imuCallback,this);
+    non_ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
+    ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("transform_ground_cloud", 1);
+    height_marker_pub = nh_.advertise<visualization_msgs::MarkerArray>("wall_height_markers", 1);
+    marker_pub = nh_.advertise<visualization_msgs::Marker>("ground_plane_marker", 1);
+}
+
+void GroundSegmentation::gpsCallback(const gps_common::GPSFixConstPtr &msg)
+{
+    current_lat = msg->latitude;
+    current_lon = msg->longitude;
+    ROS_INFO("lat: %f, lon: %f", current_lat, current_lon);
+}
+
+void GroundSegmentation::imuCallback(const sensor_msgs::Imu::ConstPtr &imu_msg)
+{
+    std::lock_guard<std::mutex> lock(imu_mutex);
+    imu_orientation.w() = imu_msg->orientation.w;
+    imu_orientation.x() = imu_msg->orientation.x;
+    imu_orientation.y() = imu_msg->orientation.y;
+    imu_orientation.z() = imu_msg->orientation.z;
+    ROS_INFO("IMU orientation updated. w: %f, x: %f, y: %f, z: %f",
+             imu_orientation.w(), imu_orientation.x(), imu_orientation.y(), imu_orientation.z());
+}
+
+void GroundSegmentation::publishToSocket(const WallInfo &info, const pcl::PointCloud<pcl::PointXYZI>::Ptr &wall_cloud)
+{
+    json j;
+    j["wall_points"] = json::array();
+    for (const auto &pt : info.wall_points)
+    {
+        j["wall_points"].push_back({{"x", pt.x}, {"y", pt.y}, {"z", pt.z}});
+    }
+    j["slope_angle"] = info.back_slope_angle;
+    j["lat"] = info.latitude;
+    j["lon"] = info.longitude;
+
+    json cloud_json = json::array();
+    for (const auto &pt : wall_cloud->points)
+    {
+        cloud_json.push_back({pt.x, pt.y, pt.z});
+    }
+    j["cloud"] = cloud_json;
+
+    std::string payload = j.dump();
+    int ret = send(sock_fd, payload.c_str(), payload.size(), 0);
+    if (ret < 0)
+    {
+        perror("Socket send failed");
+    }
+    else
+    {
+        ROS_INFO("Wall info sent to socket, size: %ld bytes", payload.size());
+    }
+}
+
+void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
+{
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_non_ground(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ground(new pcl::PointCloud<pcl::PointXYZI>);
+    // 记录程序开始时间
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    Eigen::Quaternionf imu_q;
+    {
+        std::lock_guard<std::mutex> lock(imu_mutex);
+        imu_q = imu_orientation;
+    }
+
+    // 将点云从车身坐标变换到水平坐标（即去除roll和pitch）
+    Eigen::Matrix3f R = imu_q.toRotationMatrix();
+
+    // 提取 roll 和 pitch 的反旋转
+    Eigen::Vector3f euler = R.eulerAngles(0, 1, 2); // roll pitch yaw
+    float roll = euler[0], pitch = euler[1];
+
+    // 构造反旋转矩阵，只矫正 roll 和 pitch
+    Eigen::Matrix3f inv_rot;
+    inv_rot = Eigen::AngleAxisf(-pitch, Eigen::Vector3f::UnitY()) *
+              Eigen::AngleAxisf(-roll, Eigen::Vector3f::UnitX());
+
+    Eigen::Affine3f transform(inv_rot);
+
+    float roll_deg = 2.0f;
+    float pitch_deg = 0.0f;
+
+    float roll_rad = roll_deg * M_PI / 180.0f;
+    float pitch_rad = pitch_deg * M_PI / 180.0f;
+    // 逆向旋转矫正
+    transform.rotate(Eigen::AngleAxisf(-roll_rad, Eigen::Vector3f::UnitX()));
+    transform.rotate(Eigen::AngleAxisf(-pitch_rad, Eigen::Vector3f::UnitY()));
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_out(new pcl::PointCloud<pcl::PointXYZI>());
+    std::vector<WallSlice> height_slice;
+    double slope_angle;
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
+    ground_sgementation(cloud_msg, cloud_non_ground, cloud_ground, height_slice, slope_angle, coefficients);
+    sensor_msgs::PointCloud2 cloud_msg2;
+    pcl::toROSMsg(*cloud_non_ground, cloud_msg2);
+    cloud_msg2.header.frame_id = "perception"; // 或你的坐标系
+    cloud_msg2.header.stamp = ros::Time::now();
+    non_ground_pub.publish(cloud_msg2);
+    pcl::transformPointCloud(*cloud_ground, *cloud_out, transform);
+    ROS_INFO("ground points size:%ld",cloud_out->points.size());
+    // 发布矫正后的点云（可选）
+    sensor_msgs::PointCloud2 corrected_msg;
+    pcl::toROSMsg(*cloud_out, corrected_msg);
+    corrected_msg.header = cloud_msg->header;
+    ground_pub.publish(corrected_msg);
+    double transform_angle = slope_angle;
+    getSlopAngle(cloud_out, transform_angle);
+    ROS_INFO("roll: %.3f pitch:%.3f,before angle:%.3f after transform angle:%.3f", roll_deg, pitch_deg, slope_angle, transform_angle);
+    publishGroundPlaneMarker(coefficients, marker_pub);
+    visualization_msgs::MarkerArray marker_array;
+    int id = 0;
+    WallInfo info;
+    info.wall_points.clear();
+    for (const auto &slice : height_slice)
+    {
+        WallPoint pt;
+        pt.x = slice.x_center; // 挡墙 X 位置固定
+        pt.y = slice.y_center; // Y 中心
+        pt.z = slice.height(); // Z 为高度
+        info.wall_points.push_back(pt);
+        visualization_msgs::Marker text;
+        text.header.frame_id = "perception";
+        text.header.stamp = ros::Time::now();
+        text.ns = "wall_heights";
+        text.id = id++;
+        text.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text.action = visualization_msgs::Marker::ADD;
+
+        text.pose.position.x = slice.x_center; // 固定在墙体 x 附近
+        text.pose.position.y = slice.y_center;
+        text.pose.position.z = slice.z_max + 0.3; // 提高显示位置
+        text.pose.orientation.w = 1.0;
+
+        text.scale.z = 0.4; // 字体高度
+        text.color.r = 1.0;
+        text.color.g = 0.0;
+        text.color.b = 0.0;
+        text.color.a = 1.0;
+
+        std::ostringstream oss;
+        oss << "H:" << std::fixed << std::setprecision(2) << slice.height() << "m";
+        text.text = oss.str();
+
+        marker_array.markers.push_back(text);
+    }
+
+    height_marker_pub.publish(marker_array);
+
+    info.back_slope_angle = slope_angle; // 这里只是示例，实际需要计算
+    info.latitude = current_lat;
+    info.longitude = current_lon;
+
+    publishToSocket(info, cloud_non_ground);
+
+    // publishToMQTT(info, cloud_non_ground);
+
+    // 程序退出前，记录结束时间
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+
+    ROS_INFO_STREAM("Cost Time: " << duration << " ms");
+}
+
+std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByGridBFS(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud)
 {
     const float grid_size = 1.0;
-    const float x_min = -30.0f, x_max = 10.0f;
-    const float y_min = 15.0f, y_max = 65.0f;
+    const float x_min = this->roi_min_x_, x_max = this->roi_max_x_;
+    const float y_min = this->roi_min_y_, y_max = this->roi_max_y_;
 
     const int grid_cols = static_cast<int>((x_max - x_min) / grid_size); // X方向
     const int grid_rows = static_cast<int>((y_max - y_min) / grid_size); // Y方向
@@ -222,7 +490,7 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmetation::clusterByGr
     return clusters;
 }
 
-float GroundSegmetation::calculateSlopeAngle(
+float GroundSegmentation::calculateSlopeAngle(
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in,
     float &wall_height_out,
     pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out)
@@ -315,11 +583,11 @@ float GroundSegmetation::calculateSlopeAngle(
     wall_cluster_out = selected_cluster;
     return 0;
 }
-void GroundSegmetation::getSlopAngle(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_ground, double &slope_angle)
+void GroundSegmentation::getSlopAngle(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_ground, double &slope_angle)
 {
-    if(cloud_ground->empty())
+    if (cloud_ground->empty())
     {
-        return ;
+        return;
     }
 
     pcl::SACSegmentation<pcl::PointXYZI> seg;
@@ -339,14 +607,12 @@ void GroundSegmetation::getSlopAngle(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud
     seg.segment(*inlier_indices, *coefficients);
 
     slope_angle = calculateSlopeAngle(coefficients);
-
 }
 
-void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr &input, pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_non_ground,pcl::PointCloud<pcl::PointXYZI>::Ptr &non_ground, std::vector<WallSlice> &height_slice, double &slope_angle, pcl::ModelCoefficients::Ptr &coefficients)
+void GroundSegmentation::ground_sgementation(const sensor_msgs::PointCloud2ConstPtr &input, pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_non_ground, pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_ground, std::vector<WallSlice> &height_slice, double &slope_angle, pcl::ModelCoefficients::Ptr &coefficients)
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZI>);
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ground(new pcl::PointCloud<pcl::PointXYZI>);
     // 转换 PointCloud2 数据为 PCL 点云
     pcl::fromROSMsg(*input, *cloud);
     // cloud_filtered->reserve(cloud->points.size());
@@ -359,14 +625,10 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
     // }
     for (auto point : cloud->points)
     {
-        if (point.x < this->roi_max_x_ && point.x > this->roi_min_x_ 
-            && point.y < this->roi_max_y_ && point.y > this->roi_min_y_)
+        if (point.x < this->roi_max_x_ && point.x > this->roi_min_x_ && point.y < this->roi_max_y_ && point.y > this->roi_min_y_)
         {
             cloud_filtered->points.push_back(point);
         }
-
-
-        
     }
 
     // // 过滤掉过远和过近的点（假设地面在一定的Z范围内）
