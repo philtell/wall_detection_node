@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include <map>
 #include <vector>
+#include <ros/ros.h>
+#include <std_srvs/Trigger.h>   // 标准触发型Service
 #include <iostream>
 const float grid_size = 0.5;
 const float x_min = -20.0f;
@@ -40,10 +42,50 @@ private:
     // IMU 数据
     double imu_pitch = 0.0; // 车辆俯仰角度
     double imu_roll = 0.0;  // 车辆横滚角度
+    ros::NodeHandle nh_;
+    ros::ServiceServer service_;
+
+    // 参数变量
+    std::string robot_name_;
+    int robot_id_;
+    double robot_speed_;
+    double roi_min_x_;
+    double roi_max_x_;
+    double roi_min_y_;
+    double roi_max_y_;
 public:
     GroundSegmetation()
     {
 
+    }
+
+    GroundSegmetation(ros::NodeHandle& nh) : nh_(nh) {
+        loadParams();
+        service_ = nh_.advertiseService("reload_params", &GroundSegmetation::reloadCallback, this);
+    }
+    void setNodeHandle(ros::NodeHandle& nh) {
+        nh_ = nh;
+        loadParams();
+        service_ = nh_.advertiseService("reload_params", &GroundSegmetation::reloadCallback, this);
+    }
+
+    void loadParams() {
+        nh_.param<std::string>("robot_name", robot_name_, "default_robot");
+        nh_.param<int>("robot_id", robot_id_, 0);
+        nh_.param<double>("robot_speed", robot_speed_, 1.0);
+        nh_.param<double>("min_x", this->roi_min_x_, -35.0);
+        nh_.param<double>("max_x", this->roi_max_x_,35.0);
+        nh_.param<double>("min_y", this->roi_min_y_, 15.0);
+        nh_.param<double>("max_y", this->roi_max_y_, 65.0);
+        ROS_INFO("robot_name: %s, robot_id: %d, robot_speed: %f, min_x: %f, max_x: %f, min_y: %f, max_y: %f",
+                 robot_name_.c_str(), robot_id_, robot_speed_, roi_min_x_, roi_max_x_, roi_min_y_, roi_max_y_);
+    }
+
+    bool reloadCallback(std_srvs::Trigger::Request& req, std_srvs::Trigger::Response& res) {
+        loadParams();
+        res.success = true;
+        res.message = "Parameters reloaded successfully.";
+        return true;
     }
     void ground_sgementation(const sensor_msgs::PointCloud2ConstPtr& input,pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_non_ground,pcl::PointCloud<pcl::PointXYZI>::Ptr &non_ground,std::vector<WallSlice>& height_slice,double& slope_angle,pcl::ModelCoefficients::Ptr &coefficients);
     void getSlopAngle(pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_ground,double& slope_angle);

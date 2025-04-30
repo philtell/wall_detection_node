@@ -359,10 +359,14 @@ void GroundSegmetation::ground_sgementation(const sensor_msgs::PointCloud2ConstP
     // }
     for (auto point : cloud->points)
     {
-        if (point.x < 0 && point.y > 15 && point.y < 45)
+        if (point.x < this->roi_max_x_ && point.x > this->roi_min_x_ 
+            && point.y < this->roi_max_y_ && point.y > this->roi_min_y_)
         {
             cloud_filtered->points.push_back(point);
         }
+
+
+        
     }
 
     // // 过滤掉过远和过近的点（假设地面在一定的Z范围内）

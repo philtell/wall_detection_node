@@ -243,8 +243,8 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
   corrected_msg.header = cloud_msg->header;
   ground_pub.publish(corrected_msg);
   double transform_angle = slope_angle;
-  ground_seg.getSlopAngle(cloud_ground,transform_angle);
-  ROS_INFO("roll: %.3f pitch:%.3f,before angle:%.3f after transform angle:%.3f", roll,pitch,slope_angle,transform_angle);
+  ground_seg.getSlopAngle(cloud_out,transform_angle);
+  ROS_INFO("roll: %.3f pitch:%.3f,before angle:%.3f after transform angle:%.3f", roll_deg,pitch_deg,slope_angle,transform_angle);
   publishGroundPlaneMarker(coefficients, marker_pub);
   visualization_msgs::MarkerArray marker_array;
   int id = 0;
@@ -302,7 +302,7 @@ void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg) {
 int main(int argc, char** argv) {
   ros::init(argc, argv, "wall_detector_node");
   ros::NodeHandle nh;
-
+  ground_seg.setNodeHandle(nh);
   // initSocket("127.0.0.1", 9000);  // 你可以替换为目标服务器的 IP 和端口
 
 
