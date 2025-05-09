@@ -153,7 +153,7 @@ public:
     std::vector<WallSlice> sliceWallByX(pcl::PointCloud<pcl::PointXYZI>::Ptr wall_cluster, float slice_width);
     std::vector<WallSlice> sliceWallByY(pcl::PointCloud<pcl::PointXYZI>::Ptr wall_cluster, float slice_width);
 
-    float calculateSlopeAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in, float &wall_height_out, pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out);
+    // float calculateSlopeAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in, float &wall_height_out, pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out);
     std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clusterByGridBFS(
         const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud);
     // 计算平面法向量与水平面之间的夹角（反坡）

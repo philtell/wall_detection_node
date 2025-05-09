@@ -490,99 +490,93 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
     return clusters;
 }
 
-float GroundSegmentation::calculateSlopeAngle(
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in,
-    float &wall_height_out,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out)
-{
-    // 1. 地面分割
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
-    pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices);
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+// float GroundSegmentation::calculateSlopeAngle(
+//     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in,
+//     float &wall_height_out,
+//     pcl::PointCloud<pcl::PointXYZ>::Ptr &wall_cluster_out)
+// {
+//     // 1. 地面分割
+//     pcl::SACSegmentation<pcl::PointXYZ> seg;
+//     pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices);
+//     pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
 
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(0.1);
-    seg.setInputCloud(cloud_in);
-    seg.segment(*ground_inliers, *coefficients);
+//     seg.setOptimizeCoefficients(true);
+//     seg.setModelType(pcl::SACMODEL_PLANE);
+//     seg.setMethodType(pcl::SAC_RANSAC);
+//     seg.setDistanceThreshold(0.1);
+//     seg.setInputCloud(cloud_in);
+//     seg.segment(*ground_inliers, *coefficients);
 
-    if (ground_inliers->indices.empty())
-    {
-        ROS_WARN("No ground found.");
-        return -1;
-    }
+//     if (ground_inliers->indices.empty())
+//     {
+//         ROS_WARN("No ground found.");
+//         return -1;
+//     }
 
-    // 2. 提取非地面点
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_nonground(new pcl::PointCloud<pcl::PointXYZ>);
-    extract.setInputCloud(cloud_in);
-    extract.setIndices(ground_inliers);
-    extract.setNegative(true); // 提取非地面
-    extract.filter(*cloud_nonground);
+//     // 2. 提取非地面点
+//     pcl::ExtractIndices<pcl::PointXYZ> extract;
+//     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_nonground(new pcl::PointCloud<pcl::PointXYZ>);
+//     extract.setInputCloud(cloud_in);
+//     extract.setIndices(ground_inliers);
+//     extract.setNegative(true); // 提取非地面
+//     extract.filter(*cloud_nonground);
 
-    // 3. 欧几里得聚类
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-    tree->setInputCloud(cloud_nonground);
+//     // 3. 欧几里得聚类
+//     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+//     tree->setInputCloud(cloud_nonground);
 
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(0.3); // 可调
-    ec.setMinClusterSize(30);
-    ec.setMaxClusterSize(100000);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(cloud_nonground);
-    ec.extract(cluster_indices);
+//     std::vector<pcl::PointIndices> cluster_indices;
+//     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+//     ec.setClusterTolerance(0.3); // 可调
+//     ec.setMinClusterSize(30);
+//     ec.setMaxClusterSize(100000);
+//     ec.setSearchMethod(tree);
+//     ec.setInputCloud(cloud_nonground);
+//     ec.extract(cluster_indices);
 
-    // 4. 筛选区域并找最大聚类
-    int max_points = 0;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr selected_cluster(new pcl::PointCloud<pcl::PointXYZ>);
-    for (const auto &indices : cluster_indices)
-    {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZ>);
-        for (int idx : indices.indices)
-            cluster->points.push_back(cloud_nonground->points[idx]);
+//     // 4. 筛选区域并找最大聚类
+//     int max_points = 0;
+//     pcl::PointCloud<pcl::PointXYZ>::Ptr selected_cluster(new pcl::PointCloud<pcl::PointXYZ>);
+//     pcl::PointIndices max_indexs;
+//     for (const auto &indices : cluster_indices)
+//     {
+//         // pcl::PointCloud<pcl::PointXYZ>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZ>);
+//         // for (int idx : indices.indices)
+//         //     cluster->points.push_back(cloud_nonground->points[idx]);
 
-        // 判断是否在指定区域
-        bool in_range = false;
-        for (const auto &pt : cluster->points)
-        {
-            if (pt.x > -22 && pt.x < -18 && pt.y > 7 && pt.y < 20)
-            {
-                in_range = true;
-                break;
-            }
-        }
+//         if ( indices.indices.size() > max_points)
+//         {
+//             // *selected_cluster = *cluster;
+//             max_points = indices.indices.size();
+//             max_indexs = indices;
+//         }
+//     }
+//     if(max_indexs.indices.empty())
+//     {
+//         ROS_WARN("No wall cluster found.");
+//         return -1;
+//     }
+//     for(int idx : max_indexs.indices)
+//     {
+//         selected_cluster->points.push_back(cloud_nonground->points[idx]);
+//     }
 
-        if (in_range && cluster->points.size() > max_points)
-        {
-            *selected_cluster = *cluster;
-            max_points = cluster->points.size();
-        }
-    }
+//     // 5. 计算挡墙高度：z 最大 - z 最小
+//     float min_z = std::numeric_limits<float>::max();
+//     float max_z = -std::numeric_limits<float>::max();
 
-    if (selected_cluster->empty())
-    {
-        ROS_WARN("No wall cluster found in specified region.");
-        return -1;
-    }
+//     for (const auto &pt : selected_cluster->points)
+//     {
+//         if (pt.z < min_z)
+//             min_z = pt.z;
+//         if (pt.z > max_z)
+//             max_z = pt.z;
+//     }
 
-    // 5. 计算挡墙高度：z 最大 - z 最小
-    float min_z = std::numeric_limits<float>::max();
-    float max_z = -std::numeric_limits<float>::max();
-
-    for (const auto &pt : selected_cluster->points)
-    {
-        if (pt.z < min_z)
-            min_z = pt.z;
-        if (pt.z > max_z)
-            max_z = pt.z;
-    }
-
-    wall_height_out = max_z - min_z;
-    wall_cluster_out = selected_cluster;
-    return 0;
-}
+//     wall_height_out = max_z - min_z;
+//     wall_cluster_out = selected_cluster;
+//     return 0;
+// }
 void GroundSegmentation::getSlopAngle(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_ground, double &slope_angle)
 {
     if (cloud_ground->empty())
