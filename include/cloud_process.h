@@ -111,6 +111,7 @@ private:
     double roi_max_y_;
 
     ros::Publisher non_ground_pub;
+    ros::Publisher adjust_ground_pub;
     ros::Publisher ground_pub;
     ros::Publisher height_marker_pub;
     ros::Publisher marker_pub;
@@ -133,9 +134,13 @@ public:
         ROS_INFO("robot_name: %s, robot_id: %d, robot_speed: %f, min_x: %f, max_x: %f, min_y: %f, max_y: %f",
                  robot_name_.c_str(), robot_id_, robot_speed_, roi_min_x_, roi_max_x_, roi_min_y_, roi_max_y_);
     }
-
+    void rotatePointCloud(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_in,
+                      pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_out,
+                      const Eigen::Matrix3f& R);
+    void computePlaneNormal(const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud, Eigen::Vector3f& normal);
     void gpsCallback(const gps_common::GPSFixConstPtr& msg);
     void imuCallback(const sensor_msgs::Imu::ConstPtr& imu_msg);
+    Eigen::Matrix3f computeRotationToHorizontal(const Eigen::Vector3f& normal);
     void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg);
     void publishGroundPlaneMarker(const pcl::ModelCoefficients::Ptr& coefficients,
                               ros::Publisher& marker_pub,

@@ -1,4 +1,5 @@
 #include "cloud_process.h"
+#include <pcl-1.10/pcl/impl/point_types.hpp>
 
 // 输入：聚类点云
 std::vector<WallSlice> GroundSegmentation::sliceWallByY(
@@ -229,6 +230,7 @@ GroundSegmentation::GroundSegmentation(ros::NodeHandle &nh) : nh_(nh)
     rtk_sub = nh_.subscribe("rtk_test", 10, &GroundSegmentation::gpsCallback,this);
     imu_sub = nh_.subscribe("imu", 10, &GroundSegmentation::imuCallback,this);
     non_ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
+    adjust_ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("adjust_ground_cloud", 1);
     ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("transform_ground_cloud", 1);
     height_marker_pub = nh_.advertise<visualization_msgs::MarkerArray>("wall_height_markers", 1);
     marker_pub = nh_.advertise<visualization_msgs::Marker>("ground_plane_marker", 1);
@@ -252,6 +254,40 @@ void GroundSegmentation::imuCallback(const sensor_msgs::Imu::ConstPtr &imu_msg)
     // ROS_INFO("IMU orientation updated. w: %f, x: %f, y: %f, z: %f",
     //          imu_orientation.w(), imu_orientation.x(), imu_orientation.y(), imu_orientation.z());
 }
+
+void GroundSegmentation::computePlaneNormal(const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud, Eigen::Vector3f& normal) {
+    // 计算点云质心
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*ground_cloud, centroid);
+
+    // 计算协方差矩阵
+    Eigen::Matrix3f covariance;
+    pcl::computeCovarianceMatrixNormalized(*ground_cloud, centroid, covariance);
+
+    // SVD 分解
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> solver(covariance);
+    normal = solver.eigenvectors().col(0);  // 最小特征值对应的特征向量是法向量
+
+    // 法向量朝上（可选）
+    if (normal[2] < 0) normal = -normal;
+}
+
+void GroundSegmentation::rotatePointCloud(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_in,
+                      pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_out,
+                      const Eigen::Matrix3f& R) {
+    cloud_out->clear();
+    for (const auto& pt : cloud_in->points) {
+        Eigen::Vector3f p(pt.x, pt.y, pt.z);
+        Eigen::Vector3f p_rotated = R * p;
+        pcl::PointXYZI pt_rotated;
+        pt_rotated.x = p_rotated.x();
+        pt_rotated.y = p_rotated.y();
+        pt_rotated.z = p_rotated.z();
+        pt_rotated.intensity = pt.intensity; // 保留强度信息
+        cloud_out->points.push_back(pt_rotated);
+    }
+}
+
 
 void GroundSegmentation::publishToSocket(const WallInfo &info, const pcl::PointCloud<pcl::PointXYZI>::Ptr &wall_cloud)
 {
@@ -291,6 +327,21 @@ void GroundSegmentation::computeRollPitch(float ax, float ay, float az, float& r
     pitch_deg = pitch * 180.0 / M_PI;
 }
 
+Eigen::Matrix3f GroundSegmentation::computeRotationToHorizontal(const Eigen::Vector3f& normal) {
+    Eigen::Vector3f target(0, 0, 1);
+    Eigen::Vector3f axis = normal.cross(target);
+    float angle = acos(normal.dot(target));
+
+    if (axis.norm() < 1e-6) {
+        // 已经对齐或反向，返回单位矩阵或 180° 旋转矩阵
+        return normal.dot(target) > 0 ? Eigen::Matrix3f::Identity()
+                                      : Eigen::AngleAxisf(M_PI, Eigen::Vector3f::UnitX()).toRotationMatrix();  // 任意轴
+    }
+
+    axis.normalize();
+    Eigen::AngleAxisf rotation(angle, axis);
+    return rotation.toRotationMatrix();
+}
 
 void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
 {
@@ -337,6 +388,14 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
     cloud_msg2.header.stamp = ros::Time::now();
     non_ground_pub.publish(cloud_msg2);
     pcl::transformPointCloud(*cloud_ground, *cloud_out, transform);
+    Eigen::Vector3f normal;
+    computePlaneNormal(cloud_ground, normal);
+    Eigen::Matrix3f R1 = computeRotationToHorizontal(normal);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr aligned(new pcl::PointCloud<pcl::PointXYZI>);
+    rotatePointCloud(cloud_ground, aligned, R1);
+    pcl::toROSMsg(*aligned, cloud_msg2);
+    cloud_msg2.header.stamp = ros::Time::now();
+    adjust_ground_pub.publish(cloud_msg2);
     ROS_INFO("ground points size:%ld",cloud_out->points.size());
     // 发布矫正后的点云（可选）
     sensor_msgs::PointCloud2 corrected_msg;
