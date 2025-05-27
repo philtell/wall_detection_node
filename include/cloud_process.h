@@ -97,6 +97,7 @@ private:
     double current_lat = 0.0;
     double current_lon = 0.0;
     Eigen::Quaternionf imu_orientation = Eigen::Quaternionf::Identity();
+    sensor_msgs::Imu m_imu_msg,current_imu_msg;
     std::mutex imu_mutex;
     struct sockaddr_in server_addr;
 
@@ -140,6 +141,7 @@ public:
                               ros::Publisher& marker_pub,
                               const std::string& frame_id = "map");
     void publishToSocket(const WallInfo& info, const pcl::PointCloud<pcl::PointXYZI>::Ptr& wall_cloud);
+    void computeRollPitch(float ax, float ay, float az, float& roll_deg, float& pitch_deg);
 
     bool reloadCallback(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res)
     {

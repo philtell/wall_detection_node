@@ -227,7 +227,7 @@ GroundSegmentation::GroundSegmentation(ros::NodeHandle &nh) : nh_(nh)
     // ROS 订阅
     cloud_sub = nh_.subscribe("lidar_front/raw_cloud", 10, &GroundSegmentation::cloudCallback,this);
     rtk_sub = nh_.subscribe("rtk_test", 10, &GroundSegmentation::gpsCallback,this);
-    imu_sub = nh_.subscribe("imu_test", 10, &GroundSegmentation::imuCallback,this);
+    imu_sub = nh_.subscribe("imu", 10, &GroundSegmentation::imuCallback,this);
     non_ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
     ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("transform_ground_cloud", 1);
     height_marker_pub = nh_.advertise<visualization_msgs::MarkerArray>("wall_height_markers", 1);
@@ -248,8 +248,9 @@ void GroundSegmentation::imuCallback(const sensor_msgs::Imu::ConstPtr &imu_msg)
     imu_orientation.x() = imu_msg->orientation.x;
     imu_orientation.y() = imu_msg->orientation.y;
     imu_orientation.z() = imu_msg->orientation.z;
-    ROS_INFO("IMU orientation updated. w: %f, x: %f, y: %f, z: %f",
-             imu_orientation.w(), imu_orientation.x(), imu_orientation.y(), imu_orientation.z());
+    m_imu_msg = *imu_msg; // 保存最新的 IMU 消息
+    // ROS_INFO("IMU orientation updated. w: %f, x: %f, y: %f, z: %f",
+    //          imu_orientation.w(), imu_orientation.x(), imu_orientation.y(), imu_orientation.z());
 }
 
 void GroundSegmentation::publishToSocket(const WallInfo &info, const pcl::PointCloud<pcl::PointXYZI>::Ptr &wall_cloud)
@@ -283,6 +284,14 @@ void GroundSegmentation::publishToSocket(const WallInfo &info, const pcl::PointC
     }
 }
 
+void GroundSegmentation::computeRollPitch(float ax, float ay, float az, float& roll_deg, float& pitch_deg) {
+    float roll  = atan2(ay, az);
+    float pitch = atan2(-ax, sqrt(ay * ay + az * az));
+    roll_deg = roll * 180.0 / M_PI;
+    pitch_deg = pitch * 180.0 / M_PI;
+}
+
+
 void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_non_ground(new pcl::PointCloud<pcl::PointXYZI>);
@@ -294,6 +303,7 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
     {
         std::lock_guard<std::mutex> lock(imu_mutex);
         imu_q = imu_orientation;
+        current_imu_msg = m_imu_msg;
     }
 
     // 将点云从车身坐标变换到水平坐标（即去除roll和pitch）
@@ -302,20 +312,17 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
     // 提取 roll 和 pitch 的反旋转
     Eigen::Vector3f euler = R.eulerAngles(0, 1, 2); // roll pitch yaw
     float roll = euler[0], pitch = euler[1];
-
-    // 构造反旋转矩阵，只矫正 roll 和 pitch
-    Eigen::Matrix3f inv_rot;
-    inv_rot = Eigen::AngleAxisf(-pitch, Eigen::Vector3f::UnitY()) *
-              Eigen::AngleAxisf(-roll, Eigen::Vector3f::UnitX());
-
-    Eigen::Affine3f transform(inv_rot);
-
-    float roll_deg = 2.0f;
-    float pitch_deg = 0.0f;
-
+    float ay = current_imu_msg.linear_acceleration.y;
+    float ax = current_imu_msg.linear_acceleration.x;
+    float az = current_imu_msg.linear_acceleration.z;
+    float roll_deg = 0, pitch_deg = 0;
+    computeRollPitch(ax, ay, az, roll_deg, pitch_deg);
+    std::cout << "Roll: " << roll_deg << "°, Pitch: " << pitch_deg << "°" << std::endl;
     float roll_rad = roll_deg * M_PI / 180.0f;
     float pitch_rad = pitch_deg * M_PI / 180.0f;
-    // 逆向旋转矫正
+
+    // 逆向旋转构造仿射变换
+    Eigen::Affine3f transform = Eigen::Affine3f::Identity();
     transform.rotate(Eigen::AngleAxisf(-roll_rad, Eigen::Vector3f::UnitX()));
     transform.rotate(Eigen::AngleAxisf(-pitch_rad, Eigen::Vector3f::UnitY()));
 
