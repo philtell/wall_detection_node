@@ -127,8 +127,11 @@ std::vector<WallSlice> GroundSegmentation::sliceWallByX(
     return slices;
 }
 
-// 替代 mqtt_client = new mqtt::async_client(...) 等初始化代码
-void GroundSegmentation::initSocket(const std::string &ip, int port)
+// =====================
+// 修改 initSocket()
+// =====================
+// ====================== 初始化服务端 ======================
+void GroundSegmentation::initSocket(int port)
 {
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0)
@@ -137,24 +140,89 @@ void GroundSegmentation::initSocket(const std::string &ip, int port)
         exit(EXIT_FAILURE);
     }
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr);
+    int opt = 1;
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
+
+    if (bind(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    {
+        perror("Socket bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(sock_fd, 5) < 0)
+    {
+        perror("Socket listen failed");
+        exit(EXIT_FAILURE);
+    }
+
+    ROS_INFO("Socket server listening on 0.0.0.0:%d", port);
+
+    // 接收客户端的线程
+    accept_thread_ = std::thread([this]()
+    {
+        while (ros::ok())
+        {
+            socklen_t addr_len = sizeof(client_addr);
+            int fd = accept(sock_fd, (struct sockaddr *)&client_addr, &addr_len);
+            if (fd < 0)
+            {
+                perror("Socket accept failed");
+                continue;
+            }
+
+            char client_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+            ROS_INFO("Client connected from %s:%d", client_ip, ntohs(client_addr.sin_port));
+
+            {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                client_fd = fd;
+            }
+
+            clientHandler(fd);
+
+            {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                client_fd = -1;
+            }
+
+            ROS_INFO("Client disconnected, waiting for new connection...");
+        }
+    });
+}
+// ====================== 处理客户端 ======================
+void GroundSegmentation::clientHandler(int fd)
+{
+    char buffer[1024];
     while (true)
     {
-        if (connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == 0)
+        memset(buffer, 0, sizeof(buffer));
+        int ret = recv(fd, buffer, sizeof(buffer) - 1, 0);
+        if (ret > 0)
         {
-            ROS_INFO("Connected to socket server at %s:%d", ip.c_str(), port);
+            buffer[ret] = '\0';
+            ROS_INFO("Received from client: %s", buffer);
+        }
+        else if (ret == 0)
+        {
+            ROS_WARN("Client disconnected.");
             break;
         }
         else
         {
-            perror("Socket connection failed, retrying in 1s...");
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            perror("Socket recv failed");
+            break;
         }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    close(fd);
 }
+
 
 GroundSegmentation::~GroundSegmentation()
 {
@@ -222,11 +290,11 @@ void GroundSegmentation::publishGroundPlaneMarker(const pcl::ModelCoefficients::
 
 GroundSegmentation::GroundSegmentation(ros::NodeHandle &nh) : nh_(nh)
 {
-    // initSocket("127.0.0.1", 9000); // 你可以替换为目标服务器的 IP 和端口
+    initSocket(9000); // 启动 socket 服务端
+
     loadParams();
     service_ = nh_.advertiseService("reload_params", &GroundSegmentation::reloadCallback, this);
-    // ROS 订阅
-    cloud_sub = nh_.subscribe("lidar_front/raw_cloud", 10, &GroundSegmentation::cloudCallback,this);
+    cloud_sub = nh_.subscribe("iv_points", 10, &GroundSegmentation::cloudCallback,this);
     rtk_sub = nh_.subscribe("rtk_test", 10, &GroundSegmentation::gpsCallback,this);
     imu_sub = nh_.subscribe("imu", 10, &GroundSegmentation::imuCallback,this);
     non_ground_pub = nh_.advertise<sensor_msgs::PointCloud2>("non_ground_cloud", 1);
@@ -289,34 +357,43 @@ void GroundSegmentation::rotatePointCloud(const pcl::PointCloud<pcl::PointXYZI>:
 }
 
 
+// ====================== 发布 JSON 数据 ======================
 void GroundSegmentation::publishToSocket(const WallInfo &info, const pcl::PointCloud<pcl::PointXYZI>::Ptr &wall_cloud)
 {
     json j;
     j["wall_points"] = json::array();
     for (const auto &pt : info.wall_points)
-    {
         j["wall_points"].push_back({{"x", pt.x}, {"y", pt.y}, {"z", pt.z}});
-    }
     j["slope_angle"] = info.back_slope_angle;
     j["lat"] = info.latitude;
     j["lon"] = info.longitude;
 
-    json cloud_json = json::array();
-    for (const auto &pt : wall_cloud->points)
-    {
-        cloud_json.push_back({pt.x, pt.y, pt.z});
-    }
-    j["cloud"] = cloud_json;
+    // json cloud_json = json::array();
+    // for (const auto &pt : wall_cloud->points)
+    //     cloud_json.push_back({pt.x, pt.y, pt.z});
+    // j["cloud"] = cloud_json;
 
-    std::string payload = j.dump();
-    int ret = send(sock_fd, payload.c_str(), payload.size(), 0);
-    if (ret < 0)
+    std::string payload = j.dump() + "\n";
+
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (client_fd > 0)
     {
-        perror("Socket send failed");
+        int ret = send(client_fd, payload.c_str(), payload.size(), 0);
+        if (ret < 0)
+        {
+            perror("Socket send failed");
+            close(client_fd);
+            client_fd = -1;
+        }
+        else
+        {
+            ROS_INFO("Wall info sent, size: %ld bytes", payload.size());
+        }
     }
     else
     {
-        ROS_INFO("Wall info sent to socket, size: %ld bytes", payload.size());
+        // 没有客户端连接，直接丢掉
+        ROS_WARN("No client connected, skipping send.");
     }
 }
 
@@ -345,6 +422,13 @@ Eigen::Matrix3f GroundSegmentation::computeRotationToHorizontal(const Eigen::Vec
 
 void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
 {
+    size_t point_count = cloud_msg->width * cloud_msg->height;
+    if(point_count==0)
+    {
+        ROS_WARN("Reveived empty point cloud,skipping.");
+        return;
+    }
+    ROS_INFO("Point cloud size: %zu\n",point_count);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_non_ground(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ground(new pcl::PointCloud<pcl::PointXYZI>);
     // 记录程序开始时间
@@ -381,8 +465,14 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
     std::vector<WallSlice> height_slice;
     double slope_angle;
     pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
+
     ground_sgementation(cloud_msg, cloud_non_ground, cloud_ground, height_slice, slope_angle, coefficients);
+    ROS_INFO("no ground size:%ld, ground size:%ld\n",cloud_non_ground->points.size(),cloud_ground->points.size());
     sensor_msgs::PointCloud2 cloud_msg2;
+    if(cloud_non_ground->points.size()==0)
+    {
+        return;
+    }
     pcl::toROSMsg(*cloud_non_ground, cloud_msg2);
     cloud_msg2.header.frame_id = "perception"; // 或你的坐标系
     cloud_msg2.header.stamp = ros::Time::now();
@@ -397,6 +487,10 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
     cloud_msg2.header.stamp = ros::Time::now();
     adjust_ground_pub.publish(cloud_msg2);
     ROS_INFO("ground points size:%ld",cloud_out->points.size());
+    if(cloud_out->points.size()==0)
+    {
+        return;
+    }
     // 发布矫正后的点云（可选）
     sensor_msgs::PointCloud2 corrected_msg;
     pcl::toROSMsg(*cloud_out, corrected_msg);
@@ -462,25 +556,44 @@ void GroundSegmentation::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &c
 
 std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByGridBFS(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud)
 {
+    // 添加输入检查
+    if (!input_cloud || input_cloud->empty()) {
+        ROS_WARN("Input cloud is empty or null!");
+        return {};
+    }
+
     const float grid_size = 1.0;
     const float x_min = this->roi_min_x_, x_max = this->roi_max_x_;
     const float y_min = this->roi_min_y_, y_max = this->roi_max_y_;
 
-    const int grid_cols = static_cast<int>((x_max - x_min) / grid_size); // X方向
-    const int grid_rows = static_cast<int>((y_max - y_min) / grid_size); // Y方向
+    const int grid_cols = static_cast<int>((x_max - x_min) / grid_size);
+    const int grid_rows = static_cast<int>((y_max - y_min) / grid_size);
+
+    // 检查网格维度是否有效
+    if (grid_rows <= 0 || grid_cols <= 0) {
+        ROS_ERROR("Invalid grid dimensions: rows=%d, cols=%d", grid_rows, grid_cols);
+        return {};
+    }
 
     // 建立格子索引：每个格子里存放的是点的索引
     std::vector<std::vector<std::vector<int>>> grid(grid_rows, std::vector<std::vector<int>>(grid_cols));
 
     int valid_points = 0;
     int no_valid_points = 0;
-    // 映射点到栅格
+    
+    // 映射点到栅格 - 添加边界检查
     for (size_t i = 0; i < input_cloud->points.size(); ++i)
     {
         const auto &pt = input_cloud->points[i];
+        
+        // 检查点是否有效（避免NaN点）
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+            ++no_valid_points;
+            continue;
+        }
+        
         if (pt.x < x_min || pt.x >= x_max || pt.y < y_min || pt.y >= y_max)
         {
-            // ROS_INFO("Point %zu: x = %.2f, y = %.2f", i, pt.x, pt.y);
             ++no_valid_points;
             continue;
         }
@@ -488,8 +601,17 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
         ++valid_points;
         int col = static_cast<int>((pt.x - x_min) / grid_size);
         int row = static_cast<int>((pt.y - y_min) / grid_size);
-        grid[row][col].push_back(i);
+        
+        // 确保行列索引在有效范围内
+        if (row >= 0 && row < grid_rows && col >= 0 && col < grid_cols) {
+            grid[row][col].push_back(static_cast<int>(i));
+        } else {
+            ROS_WARN("Point out of grid bounds: row=%d, col=%d (max: %d, %d)", 
+                     row, col, grid_rows-1, grid_cols-1);
+            ++no_valid_points;
+        }
     }
+    
     ROS_INFO("valid points: %d no valid points: %d", valid_points, no_valid_points);
 
     int non_empty_cells = 0;
@@ -501,7 +623,8 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
                 ++non_empty_cells;
         }
     }
-    ROS_INFO("no empty grid size: %d", non_empty_cells);
+    ROS_INFO("non empty grid cells: %d", non_empty_cells);
+    
     std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clusters;
     std::vector<std::vector<bool>> visited(grid_rows, std::vector<bool>(grid_cols, false));
 
@@ -526,9 +649,15 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
                 auto [cr, cc] = q.front();
                 q.pop();
 
-                for (int idx : grid[cr][cc])
+                // 添加点索引范围检查
+                for (int idx : grid[cr][cc]) 
                 {
-                    cluster->points.push_back(input_cloud->points[idx]);
+                    // 确保索引在有效范围内
+                    if (idx >= 0 && static_cast<size_t>(idx) < input_cloud->points.size()) {
+                        cluster->points.push_back(input_cloud->points[idx]);
+                    } else {
+                        ROS_WARN("Invalid point index: %d (max: %zu)", idx, input_cloud->points.size());
+                    }
                 }
 
                 for (int i = 0; i < 4; ++i)
@@ -543,9 +672,10 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
                     }
                 }
             }
+            
             ROS_INFO("inner Cluster size: %zu", cluster->points.size());
             if (cluster->points.size() >= 100)
-            { // 设定最小聚类点数
+            {
                 cluster->width = cluster->points.size();
                 cluster->height = 1;
                 cluster->is_dense = true;
@@ -553,6 +683,8 @@ std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> GroundSegmentation::clusterByG
             }
         }
     }
+    
+    ROS_INFO("Total clusters found: %zu", clusters.size());
     return clusters;
 }
 

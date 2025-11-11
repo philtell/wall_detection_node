@@ -93,14 +93,15 @@ private:
     double imu_roll = 0.0;  // 车辆横滚角度
     ros::NodeHandle nh_;
     ros::ServiceServer service_;
-    int sock_fd;
     double current_lat = 0.0;
     double current_lon = 0.0;
     Eigen::Quaternionf imu_orientation = Eigen::Quaternionf::Identity();
     sensor_msgs::Imu m_imu_msg,current_imu_msg;
     std::mutex imu_mutex;
     struct sockaddr_in server_addr;
-
+    int sock_fd;                    // 服务器 socket
+    int client_fd;                  // 客户端 socket
+    struct sockaddr_in client_addr;
     // 参数变量
     std::string robot_name_;
     int robot_id_;
@@ -118,7 +119,10 @@ private:
     ros::Subscriber cloud_sub;
     ros::Subscriber rtk_sub;
     ros::Subscriber imu_sub;
-    void initSocket(const std::string& ip, int port);
+    std::thread accept_thread_;
+    std::mutex client_mutex,client_mutex_;
+
+    void initSocket(int port);
 public:
     GroundSegmentation(ros::NodeHandle &nh);
 
@@ -128,7 +132,7 @@ public:
         nh_.param<int>("robot_id", robot_id_, 0);
         nh_.param<double>("robot_speed", robot_speed_, 1.0);
         nh_.param<double>("min_x", this->roi_min_x_, -35.0);
-        nh_.param<double>("max_x", this->roi_max_x_, 0.0);
+        nh_.param<double>("max_x", this->roi_max_x_, 35.0);
         nh_.param<double>("min_y", this->roi_min_y_, 15.0);
         nh_.param<double>("max_y", this->roi_max_y_, 65.0);
         ROS_INFO("robot_name: %s, robot_id: %d, robot_speed: %f, min_x: %f, max_x: %f, min_y: %f, max_y: %f",
@@ -139,6 +143,8 @@ public:
                       const Eigen::Matrix3f& R);
     void computePlaneNormal(const pcl::PointCloud<pcl::PointXYZI>::Ptr& ground_cloud, Eigen::Vector3f& normal);
     void gpsCallback(const gps_common::GPSFixConstPtr& msg);
+    void clientHandler(int fd);
+
     void imuCallback(const sensor_msgs::Imu::ConstPtr& imu_msg);
     Eigen::Matrix3f computeRotationToHorizontal(const Eigen::Vector3f& normal);
     void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg);
